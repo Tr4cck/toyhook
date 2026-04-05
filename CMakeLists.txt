@@ -50,6 +50,22 @@ target_include_directories(toyhook_api PUBLIC
 target_compile_options(toyhook_api PRIVATE -g -O0)
 target_link_libraries(toyhook_api toyhook_inline_hook toyhook_plt_hook toyhook_arch_arm64 toyhook_utils log dl)
 
+# --- trace recorder ---
+add_library(toyhook_trace STATIC core/trace.c)
+target_include_directories(toyhook_trace PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_compile_options(toyhook_trace PRIVATE -g -O0)
+target_link_libraries(toyhook_trace toyhook_api)
+
+# --- UDS control server ---
+add_library(toyhook_server STATIC core/server.c)
+target_include_directories(toyhook_server PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_compile_options(toyhook_server PRIVATE -g -O0)
+target_link_libraries(toyhook_server toyhook_api toyhook_trace log)
+
 # --- injector ---
 add_executable(toyhook injector/injector.c)
 target_include_directories(toyhook PRIVATE
@@ -65,7 +81,14 @@ target_include_directories(toyhook_payload PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 target_compile_options(toyhook_payload PRIVATE -g -O0)
-target_link_libraries(toyhook_payload toyhook_api toyhook_arch_arm64 log dl)
+target_link_libraries(toyhook_payload toyhook_api toyhook_trace toyhook_server toyhook_arch_arm64 log dl)
+
+# --- CLI control client ---
+add_executable(toyhookctl client/toyhookctl.c)
+target_include_directories(toyhookctl PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_compile_options(toyhookctl PRIVATE -g -O0)
 
 # --- host unit tests (build with: cmake -DBUILD_TESTS=ON ..) ---
 option(BUILD_TESTS "Build host unit tests" OFF)
@@ -103,4 +126,14 @@ if(BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/tests
     )
     target_compile_options(test_plt_hook PRIVATE -g -O0)
+
+    add_executable(test_trace
+        tests/test_trace.c
+    )
+    target_include_directories(test_trace PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/tests
+    )
+    target_compile_options(test_trace PRIVATE -g -O0)
 endif()

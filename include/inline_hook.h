@@ -1,6 +1,8 @@
 #ifndef TOYHOOK_INLINE_HOOK_H
 #define TOYHOOK_INLINE_HOOK_H
 
+#include <stdint.h>
+
 /*
  * hook_inline - redirect a function by patching its entry point.
  *
@@ -37,5 +39,17 @@ int hook_inline(void *target,
  * Returns 0 on success, -1 on failure.
  */
 int unhook_inline(void *target, void *trampoline);
+
+/*
+ * hook_inline_get_insns - retrieve the original instructions saved in the
+ * trampoline header.
+ *
+ * @original   the value written to *original by hook_inline
+ * @out        receives up to 4 original instruction words
+ *
+ * Returns the number of instructions saved (always 4 currently), or -1 on
+ * error (e.g. @original is NULL or the header magic doesn't match).
+ */
+int hook_inline_get_insns(void *original, uint32_t out[4]);
 
 #endif

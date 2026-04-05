@@ -41,20 +41,17 @@ typedef struct {
     unsigned long pstate;
 } regs_t;
 
-static int get_regs(pid_t pid, regs_t *regs)
-{
+static int get_regs(pid_t pid, regs_t *regs) {
     struct iovec iov = { .iov_base = regs, .iov_len = sizeof(*regs) };
     return ptrace(PTRACE_GETREGSET, pid, (void *)NT_PRSTATUS, &iov);
 }
 
-static int set_regs(pid_t pid, const regs_t *regs)
-{
+static int set_regs(pid_t pid, const regs_t *regs) {
     struct iovec iov = { .iov_base = (void *)regs, .iov_len = sizeof(*regs) };
     return ptrace(PTRACE_SETREGSET, pid, (void *)NT_PRSTATUS, &iov);
 }
 
-static int read_mem(pid_t pid, unsigned long addr, void *buf, size_t len)
-{
+static int read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     for (size_t i = 0; i < len; i += sizeof(long)) {
         errno = 0;
         long val = ptrace(PTRACE_PEEKDATA, pid, (void *)(addr + i), NULL);
@@ -78,8 +75,7 @@ static int read_mem(pid_t pid, unsigned long addr, void *buf, size_t len)
  *   our data:                 |<-- tail -->|
  *   result:         |<-- kept -->|<-- new -->|  (rest zeroed by memset)
  */
-static int write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len)
-{
+static int write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     for (size_t i = 0; i < len; i += sizeof(long)) {
         long val = 0;
         size_t chunk = sizeof(long);
@@ -115,8 +111,7 @@ static int write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len)
  *   my_dlopen = my_base + offset          target_dlopen = target_base + offset
  *   => offset = my_dlopen - my_base       => target_dlopen = target_base + offset
  */
-static unsigned long resolve_remote_dlopen(pid_t pid)
-{
+static unsigned long resolve_remote_dlopen(pid_t pid) {
     void *sym = dlsym(RTLD_DEFAULT, "dlopen");
     if (!sym) {
         LOGE("dlsym(dlopen): %s", dlerror());
@@ -177,8 +172,7 @@ static unsigned long resolve_remote_dlopen(pid_t pid)
  * When dlopen finishes and executes `ret`, it jumps to x30 = 0xDEADDEAD,
  * which is unmapped -> SIGSEGV or SIGBUS -> we catch it as "done".
  */
-static int inject(pid_t pid, const char *so_path)
-{
+static int inject(pid_t pid, const char *so_path) {
     regs_t orig_regs;
     unsigned long dlopen_addr, path_addr;
     char pathbuf[PATH_BUF_SIZE];
@@ -254,8 +248,7 @@ detach:
     return ret;
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     if (getenv("TOYHOOK_WAIT_DEBUGGER")) {
         LOGI("waiting for debugger... pid=%d", getpid());
         sleep(30);

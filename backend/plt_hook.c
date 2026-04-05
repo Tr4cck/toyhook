@@ -1,7 +1,4 @@
 #include "plt_hook.h"
-
-
-#include <string.h>
 #include "utils/elf.h"
 #include "utils/mem.h"
 #include "utils/log.h"

@@ -6,6 +6,7 @@
 session  →  管理 hook 的生命周期
 hook     →  一个拦截点（用 PLT 或 inline 方式）
 handler  →  拦截后的回调（可以挂在 BEFORE / REPLACE / AFTER 三个阶段）
+tracer   →  环形缓冲区事件记录器，挂载到 hook 上自动记录
 ```
 
 ## 快速开始
@@ -154,6 +155,14 @@ toy_hook_on(hook, &h2);
 
 任何 handler 返回非零值会中断当前阶段的后续 handler。
 
+## 重入保护
+
+如果你的 handler（或原始函数）又触发了同一个 hook——比如 BEFORE handler 里调用 `LOGI()`，而 `LOGI` 内部又走了被 hook 的 `__system_property_get`——框架会自动处理：
+
+- `toy_dispatch` 使用线程局部的深度计数器
+- 嵌套调用时跳过所有 handler，直接调用原始函数
+- 用户不需要写任何 guard 变量
+
 ## toy_callctx_t 字段说明
 
 ```c
@@ -168,6 +177,103 @@ struct toy_callctx {
 
     int skip_original;         // 设为 1 跳过原始函数调用
 };
+```
+
+## Tracer（追踪器）
+
+tracer 将 hook 的进入/离开事件记录到无锁环形缓冲区。
+
+### 创建和挂载
+
+```c
+toy_tracer_t *tracer = toy_tracer_create(1024);  // 容量必须是 2 的幂
+toy_tracer_attach(tracer, hook);
+```
+
+挂载时会自动注册 BEFORE + AFTER handler，记录 `trace_event_t`：
+
+```c
+typedef struct {
+    unsigned long timestamp;
+    unsigned long hook_id;
+    unsigned long thread_id;
+    unsigned long args[TOY_MAX_ARGS];
+    unsigned argc;
+    unsigned long ret_val;
+    unsigned kind;       // TOY_TRACE_ENTER 或 TOY_TRACE_LEAVE
+} trace_event_t;
+```
+
+### 查询
+
+```c
+size_t count   = toy_tracer_count(tracer);
+size_t dropped = toy_tracer_dropped(tracer);
+```
+
+### 导出
+
+```c
+toy_tracer_dump(tracer, stderr);   // 导出到任意 FILE*
+```
+
+### 启停
+
+```c
+toy_tracer_disable(tracer);   // 停止记录
+toy_tracer_enable(tracer);    // 恢复记录
+```
+
+## 控制通道 (toyhookctl)
+
+payload 启动后会在抽象命名空间 UDS 上启动服务线程，可通过 `adb shell` 实时查询 hook 状态和追踪数据。
+
+### 启动服务
+
+在 payload 的 `on_load` 中：
+
+```c
+#include <pthread.h>
+#include "server.h"
+
+static toyhook_server_ctx_t server_ctx = {0};
+server_ctx.session = sess;
+server_ctx.tracer  = tracer;
+pthread_t tid;
+pthread_create(&tid, NULL, toyhook_server_run, &server_ctx);
+pthread_detach(tid);
+```
+
+### 使用 toyhookctl
+
+```bash
+adb shell toyhookctl status   # 打印所有 hook 的状态
+adb shell toyhookctl count    # 显示事件数和丢弃数
+adb shell toyhookctl dump     # 导出所有追踪事件
+adb shell toyhookctl help     # 列出命令
+adb shell toyhookctl quit     # 断开连接
+```
+
+### 协议
+
+基于文本行协议，通过抽象 UDS 通信：
+
+```
+> dump
+ENTER  hook=1 tid=12345 args=[0x7f...] @ 1234567890
+LEAVE  hook=1 tid=12345 ret=0x42 @ 1234567900
+OK
+
+> status
+Hook #1
+    target       : libmyapplication.so!__system_property_get
+    backend      : plt
+    ...
+OK
+
+> count
+events=256 dropped=3
+OK
 ```
 
 ## 常见错误
@@ -207,11 +313,18 @@ static int handler(toy_callctx_t *ctx, void *ud) {
 ## 完整示例：注入 payload
 
 ```c
-#include <android/log.h>
+#include <stdio.h>
+#include <unistd.h>
 #include <dlfcn.h>
+#include <stdlib.h>
+#include <pthread.h>
 #include "toyhook.h"
+#include "trace.h"
+#include "server.h"
+#include "utils/log.h"
 
-#define TAG "demo"
+static toy_session_t *g_sess;
+static toy_tracer_t  *g_tracer;
 
 static int on_prop_get(toy_callctx_t *ctx, void *ud) {
     typedef int (*fn_t)(const char *, char *);
@@ -221,9 +334,7 @@ static int on_prop_get(toy_callctx_t *ctx, void *ud) {
     char *value = (char *)ctx->args[1];
     int res = orig(name, value);
 
-    __android_log_print(ANDROID_LOG_INFO, TAG,
-                        "__system_property_get(\"%s\") = \"%s\" (%d)",
-                        name, value, res);
+    LOGI("__system_property_get(\"%s\") = \"%s\" (%d)", name, value, res);
 
     ctx->ret_val = (unsigned long)res;
     ctx->skip_original = 1;
@@ -232,7 +343,8 @@ static int on_prop_get(toy_callctx_t *ctx, void *ud) {
 
 __attribute__((constructor))
 static void on_load(void) {
-    toy_session_t *sess = toy_session_create();
+    g_sess = toy_session_create();
+    g_tracer = toy_tracer_create(1024);
 
     toy_target_t tgt = {
         .backend = TOY_BACKEND_PLT,
@@ -242,7 +354,7 @@ static void on_load(void) {
         },
     };
 
-    toy_hook_t *hook = toy_hook_add(sess, &tgt);
+    toy_hook_t *hook = toy_hook_add(g_sess, &tgt);
     if (hook) {
         toy_handler_t h = {
             .phases = TOY_PHASE_REPLACE,
@@ -250,18 +362,27 @@ static void on_load(void) {
             .name = "log_prop",
         };
         toy_hook_on(hook, &h);
-        toy_hook_enable(hook);
     }
-}
 
-__attribute__((destructor))
-static void on_unload(void) {
-    // toy_session_destroy 自动 disable 所有 hook
+    if (g_tracer && hook)
+        toy_tracer_attach(g_tracer, hook);
+
+    toy_commit(g_sess);
+    toy_session_describe(g_sess, stderr);
+
+    static toyhook_server_ctx_t server_ctx = {0};
+    server_ctx.session = g_sess;
+    server_ctx.tracer  = g_tracer;
+    pthread_t tid;
+    pthread_create(&tid, NULL, toyhook_server_run, &server_ctx);
+    pthread_detach(tid);
 }
 ```
 
-用 injector 注入目标进程：
+注入并查询：
 
 ```bash
-./toyhook inject <pid> /path/to/libyour_payload.so
+./toyhook inject <pid> /data/local/tmp/libyour_payload.so
+toyhookctl status
+toyhookctl dump
 ```

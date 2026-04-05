@@ -6,6 +6,7 @@
 session  →  manages the lifecycle of hooks
 hook     →  an interception point (PLT or inline)
 handler  →  callback after interception (attached to BEFORE / REPLACE / AFTER phases)
+tracer   →  ring-buffer event recorder attached to hooks
 ```
 
 ## Quick Start
@@ -154,6 +155,14 @@ toy_hook_on(hook, &h2);
 
 Any handler returning non-zero aborts subsequent handlers in the current phase.
 
+## Re-entrant Dispatch
+
+If a handler (or the original function) triggers the same hook again — e.g. your BEFORE handler calls `LOGI()` which internally calls the hooked `__system_property_get` — the framework handles this automatically:
+
+- `toy_dispatch` uses a per-thread depth counter
+- Nested invocations skip all handlers and call the original function directly
+- No user code or guard variables are needed
+
 ## toy_callctx_t Field Reference
 
 ```c
@@ -168,6 +177,103 @@ struct toy_callctx {
 
     int skip_original;         // set to 1 to skip original function call
 };
+```
+
+## Tracer
+
+The tracer records hook enter/leave events to a lock-free ring buffer.
+
+### Create and attach
+
+```c
+toy_tracer_t *tracer = toy_tracer_create(1024);  // capacity must be power of 2
+toy_tracer_attach(tracer, hook);
+```
+
+Attaching registers BEFORE + AFTER handlers that record `trace_event_t` entries:
+
+```c
+typedef struct {
+    unsigned long timestamp;
+    unsigned long hook_id;
+    unsigned long thread_id;
+    unsigned long args[TOY_MAX_ARGS];
+    unsigned argc;
+    unsigned long ret_val;
+    unsigned kind;       // TOY_TRACE_ENTER or TOY_TRACE_LEAVE
+} trace_event_t;
+```
+
+### Query
+
+```c
+size_t count   = toy_tracer_count(tracer);
+size_t dropped = toy_tracer_dropped(tracer);
+```
+
+### Dump
+
+```c
+toy_tracer_dump(tracer, stderr);   // dump to any FILE*
+```
+
+### Enable / disable recording
+
+```c
+toy_tracer_disable(tracer);   // stop recording events
+toy_tracer_enable(tracer);    // resume
+```
+
+## Control Channel (toyhookctl)
+
+The payload starts a UDS server thread that listens on an abstract namespace socket. You can query hook state and trace data at runtime from `adb shell`.
+
+### Start the server
+
+In your payload's `on_load`:
+
+```c
+#include <pthread.h>
+#include "server.h"
+
+static toyhook_server_ctx_t server_ctx = {0};
+server_ctx.session = sess;
+server_ctx.tracer  = tracer;
+pthread_t tid;
+pthread_create(&tid, NULL, toyhook_server_run, &server_ctx);
+pthread_detach(tid);
+```
+
+### Use toyhookctl
+
+```bash
+adb shell toyhookctl status   # print all hooks and their state
+adb shell toyhookctl count    # show event count and dropped count
+adb shell toyhookctl dump     # dump all recorded trace events
+adb shell toyhookctl help     # list commands
+adb shell toyhookctl quit     # disconnect
+```
+
+### Protocol
+
+Text-based line protocol over abstract UDS:
+
+```
+> dump
+ENTER  hook=1 tid=12345 args=[0x7f...] @ 1234567890
+LEAVE  hook=1 tid=12345 ret=0x42 @ 1234567900
+OK
+
+> status
+Hook #1
+    target       : libmyapplication.so!__system_property_get
+    backend      : plt
+    ...
+OK
+
+> count
+events=256 dropped=3
+OK
 ```
 
 ## Common Mistakes
@@ -207,11 +313,18 @@ static int handler(toy_callctx_t *ctx, void *ud) {
 ## Full Example: Injected Payload
 
 ```c
-#include <android/log.h>
+#include <stdio.h>
+#include <unistd.h>
 #include <dlfcn.h>
+#include <stdlib.h>
+#include <pthread.h>
 #include "toyhook.h"
+#include "trace.h"
+#include "server.h"
+#include "utils/log.h"
 
-#define TAG "demo"
+static toy_session_t *g_sess;
+static toy_tracer_t  *g_tracer;
 
 static int on_prop_get(toy_callctx_t *ctx, void *ud) {
     typedef int (*fn_t)(const char *, char *);
@@ -221,9 +334,7 @@ static int on_prop_get(toy_callctx_t *ctx, void *ud) {
     char *value = (char *)ctx->args[1];
     int res = orig(name, value);
 
-    __android_log_print(ANDROID_LOG_INFO, TAG,
-                        "__system_property_get(\"%s\") = \"%s\" (%d)",
-                        name, value, res);
+    LOGI("__system_property_get(\"%s\") = \"%s\" (%d)", name, value, res);
 
     ctx->ret_val = (unsigned long)res;
     ctx->skip_original = 1;
@@ -232,7 +343,9 @@ static int on_prop_get(toy_callctx_t *ctx, void *ud) {
 
 __attribute__((constructor))
 static void on_load(void) {
-    toy_session_t *sess = toy_session_create();
+    g_sess = toy_session_create();
+
+    g_tracer = toy_tracer_create(1024);
 
     toy_target_t tgt = {
         .backend = TOY_BACKEND_PLT,
@@ -242,7 +355,7 @@ static void on_load(void) {
         },
     };
 
-    toy_hook_t *hook = toy_hook_add(sess, &tgt);
+    toy_hook_t *hook = toy_hook_add(g_sess, &tgt);
     if (hook) {
         toy_handler_t h = {
             .phases = TOY_PHASE_REPLACE,
@@ -250,18 +363,27 @@ static void on_load(void) {
             .name = "log_prop",
         };
         toy_hook_on(hook, &h);
-        toy_hook_enable(hook);
     }
-}
 
-__attribute__((destructor))
-static void on_unload(void) {
-    // toy_session_destroy auto-disables all hooks
+    if (g_tracer && hook)
+        toy_tracer_attach(g_tracer, hook);
+
+    toy_commit(g_sess);
+    toy_session_describe(g_sess, stderr);
+
+    static toyhook_server_ctx_t server_ctx = {0};
+    server_ctx.session = g_sess;
+    server_ctx.tracer  = g_tracer;
+    pthread_t tid;
+    pthread_create(&tid, NULL, toyhook_server_run, &server_ctx);
+    pthread_detach(tid);
 }
 ```
 
-Inject into a target process with the injector:
+Inject and query:
 
 ```bash
-./toyhook inject <pid> /path/to/libyour_payload.so
+./toyhook inject <pid> /data/local/tmp/libyour_payload.so
+toyhookctl status
+toyhookctl dump
 ```

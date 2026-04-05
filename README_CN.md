@@ -8,6 +8,9 @@
 - **Inline hook** — 改写函数入口，把被覆盖的指令搬到 trampoline
 - **PLT/GOT hook** — 改写 GOT 表项，拦截动态符号调用
 - **统一 dispatch** — 所有被 hook 的调用经过同一个 before/replace/after handler 链
+- **环形缓冲区追踪器** — 记录 enter/leave 事件及参数和返回值，支持按需查询
+- **UDS 控制通道** — 通过 `toyhookctl` CLI 实时查询 hook 状态和追踪数据
+- **重入安全** — handler 中递归触发同一 hook 时（如 handler 调用的函数又走了被 hook 的符号），dispatch 管线自动跳过 handler、直接调用原函数，用户无需关心
 
 **不能做什么：**
 - 多架构支持（仅 ARM64）
@@ -34,6 +37,14 @@ bash scripts/build.sh --ndk $ANDROID_NDK_ROOT --push
 adb shell toyhook inject <pid> /data/local/tmp/libtoyhook_payload.so
 ```
 
+### 运行时查询
+
+```bash
+adb shell toyhookctl status
+adb shell toyhookctl count
+adb shell toyhookctl dump
+```
+
 ### 运行本地测试
 
 ```bash
@@ -49,6 +60,7 @@ bash scripts/test.sh
 ├──────────────────────────────────────────────────┤
 │              core/toyhook.c  (统一 API)            │
 │    session → hook → handler → dispatch 管线       │
+│    （内置线程局部重入深度保护）                      │
 ├────────────────────┬─────────────────────────────┤
 │  inline_hook.c     │       plt_hook.c             │
 │  (入口指令改写)     │       (GOT 改写)             │
@@ -57,6 +69,11 @@ bash scripts/test.sh
 │   emit.c — 指令编码                                │
 │   asm.c  — 指令重定位                              │
 │   dispatch.c — 每个 hook 的汇编 stub               │
+├──────────────────────────────────────────────────┤
+│   core/trace.c       (环形缓冲区事件记录器)         │
+├──────────────────────────────────────────────────┤
+│   core/server.c      (UDS 控制服务端)              │
+│   client/toyhookctl.c (CLI 控制客户端)             │
 ├──────────────────────────────────────────────────┤
 │   utils/  mem.c (RWX 分配、就近分配)               │
 │           elf.c (ELF 段解析)                       │
@@ -77,15 +94,21 @@ bash scripts/test.sh
 │   ├── inline_hook.c    Inline hook 后端
 │   └── plt_hook.c       PLT/GOT hook 后端
 ├── core/
-│   └── toyhook.c        统一 API + dispatch 管线
+│   ├── toyhook.c        统一 API + dispatch 管线（含重入保护）
+│   ├── trace.c          环形缓冲区追踪器
+│   └── server.c         UDS 控制服务端（抽象命名空间）
+├── client/
+│   └── toyhookctl.c     CLI 客户端，运行时查询 hook 状态
 ├── include/
 │   ├── toyhook.h        公共 API 头文件
+│   ├── trace.h          追踪器 API 头文件
+│   ├── server.h         服务端上下文 + socket 名称
 │   ├── inline_hook.h
 │   └── plt_hook.h
 ├── injector/
 │   └── injector.c       基于 ptrace 的远程 dlopen 注入器
 ├── payload/
-│   └── payload.c        示例 SO (hook getpid + __system_property_get)
+│   └── payload.c        示例 SO (PLT hook + inline hook + tracer + server)
 ├── utils/
 │   ├── elf.c/h          ELF .dynamic 解析 (DT_JMPREL, DT_SYMTAB, ...)
 │   ├── mem.c/h          RWX 页分配、就近分配
@@ -94,7 +117,12 @@ bash scripts/test.sh
 │   ├── test_inline_hook.c
 │   ├── test_plt_hook.c
 │   ├── test_toyhook.c
+│   ├── test_trace.c
 │   └── android/log.h    __android_log_print 的 mock
+├── docs/
+│   ├── usage-guide.md       使用指南（中文）
+│   ├── usage-guide.en.md    使用指南（英文）
+│   └── plan.md              功能路线图
 └── scripts/
     ├── build.sh         Android 交叉编译 + 可选推送到设备
     ├── test.sh          构建并运行本地测试
@@ -171,11 +199,39 @@ toy_hook_enable(hook);
 当被 hook 的函数被调用时：
 
 1. 汇编 stub 保存 `x0`-`x7`，调用 `toy_dispatch(hook, args, 8)`
-2. **BEFORE** handler 执行（可检查/修改参数）
-3. **REPLACE** handler 执行（可设置 `skip_original` 和 `ret_val`）
-4. 如果 `skip_original` 未设置，调用原函数
-5. **AFTER** handler 执行（可检查/修改返回值）
-6. 返回值传回调用者
+2. 重入检查：如果当前线程已在 dispatch 中，跳过所有 handler，直接调用原函数
+3. **BEFORE** handler 执行（可检查/修改参数）
+4. **REPLACE** handler 执行（可设置 `skip_original` 和 `ret_val`）
+5. 如果 `skip_original` 未设置，调用原函数
+6. **AFTER** handler 执行（可检查/修改返回值）
+7. 返回值传回调用者
+
+### 追踪器
+
+```c
+toy_tracer_t *tracer = toy_tracer_create(1024);
+toy_tracer_attach(tracer, hook);
+```
+
+事件记录到无锁环形缓冲区，运行时查询：
+
+```bash
+toyhookctl dump    # 导出所有记录的事件
+toyhookctl count   # 显示事件数和丢弃数
+```
+
+### 控制通道
+
+payload 启动后会在抽象命名空间 UDS 上监听，用 `toyhookctl` 连接：
+
+```
+Commands: dump | status | count | help | quit
+```
+
+- `status` — 打印所有 hook 及其状态
+- `count`  — 显示追踪器事件数 / 丢弃数
+- `dump`   — 导出所有追踪事件
+- `quit`   — 断开连接
 
 ### 查询与控制
 
@@ -203,6 +259,14 @@ ARM64 指令通过小型编码函数（`emit_stp_pre`、`emit_ldr_literal`、`em
 ### Dispatch stub（每个 hook 一个）
 
 每个 hook 分配独立的汇编页，保存 callee-saved 寄存器，通过 LDR literal 加载 hook 指针和 `toy_dispatch` 地址，然后进入 C 代码。避免了全局间接跳转表。
+
+### 重入 dispatch
+
+`toy_dispatch` 使用线程局部深度计数器。如果 handler（或原函数）递归触发了同一个 hook，嵌套调用会跳过所有 handler、直接调用原函数。用户完全不需要关心递归保护。
+
+### 抽象命名空间 UDS 控制通道
+
+Android 上，untrusted_app 无法创建 TCP socket（seccomp）和文件系统 socket（SELinux 跨 UID 限制）。控制服务端使用抽象命名空间 UDS（`AF_UNIX` + `sun_path[0] = '\0'`），绕过两种限制，让 `adb shell` 可以直接连接。
 
 ## 测试
 

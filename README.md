@@ -1,6 +1,6 @@
 # toyhook
 
-[中文](docs/README_CN.md)
+[中文](README_CN.md)
 
 A teaching-oriented function hooking framework for ARM64 Android. It exposes internals rather than hiding them — every component (trampoline allocation, instruction relocation, GOT patching) is readable and hackable.
 
@@ -8,6 +8,9 @@ A teaching-oriented function hooking framework for ARM64 Android. It exposes int
 - **Inline hook** — patches function prologues with a branch to a replacement, relocates stolen instructions into a trampoline
 - **PLT/GOT hook** — rewrites GOT entries to intercept dynamic symbol calls
 - **Unified dispatch** — a single pipeline routes all hooked calls through before/replace/after handler chains
+- **Ring-buffer tracer** — records enter/leave events with args and return values, queryable on-demand
+- **UDS control channel** — interactive `toyhookctl` CLI for querying hook status and trace data at runtime
+- **Re-entrant safe** — recursive hook invocation (e.g. handler calls a function that triggers the same hook) is transparently handled by the dispatch pipeline
 
 **What it doesn't do:**
 - Multi-arch (ARM64 only)
@@ -34,6 +37,14 @@ bash scripts/build.sh --ndk $ANDROID_NDK_ROOT --push
 adb shell toyhook inject <pid> /data/local/tmp/libtoyhook_payload.so
 ```
 
+### Query hooks at runtime
+
+```bash
+adb shell toyhookctl status
+adb shell toyhookctl count
+adb shell toyhookctl dump
+```
+
 ### Run host tests
 
 ```bash
@@ -49,6 +60,7 @@ bash scripts/test.sh
 ├──────────────────────────────────────────────────┤
 │              core/toyhook.c  (unified API)        │
 │    session → hook → handler → dispatch pipeline   │
+│    (includes re-entrant depth guard)              │
 ├────────────────────┬─────────────────────────────┤
 │  inline_hook.c     │       plt_hook.c             │
 │  (prologue patch)  │       (GOT rewrite)          │
@@ -57,6 +69,11 @@ bash scripts/test.sh
 │   emit.c — instruction encoding                   │
 │   asm.c  — instruction relocation                 │
 │   dispatch.c — per-hook assembly stub             │
+├──────────────────────────────────────────────────┤
+│   core/trace.c   (ring-buffer event recorder)     │
+├──────────────────────────────────────────────────┤
+│   core/server.c  (UDS control server)             │
+│   client/toyhookctl.c  (CLI control client)       │
 ├──────────────────────────────────────────────────┤
 │   utils/  mem.c (RWX allocation, near alloc)      │
 │           elf.c (ELF section parsing)             │
@@ -77,15 +94,21 @@ bash scripts/test.sh
 │   ├── inline_hook.c    Inline hook backend
 │   └── plt_hook.c       PLT/GOT hook backend
 ├── core/
-│   └── toyhook.c        Unified API + dispatch pipeline
+│   ├── toyhook.c        Unified API + dispatch pipeline (re-entrant guard)
+│   ├── trace.c          Ring-buffer trace recorder
+│   └── server.c         UDS control server (abstract namespace)
+├── client/
+│   └── toyhookctl.c     CLI client for querying hooks at runtime
 ├── include/
 │   ├── toyhook.h        Public API header
+│   ├── trace.h          Tracer API header
+│   ├── server.h         Server context + socket name
 │   ├── inline_hook.h
 │   └── plt_hook.h
 ├── injector/
 │   └── injector.c       ptrace-based remote dlopen injector
 ├── payload/
-│   └── payload.c        Example SO (hooks getpid + __system_property_get)
+│   └── payload.c        Example SO (PLT hook + inline hook + tracer + server)
 ├── utils/
 │   ├── elf.c/h          ELF .dynamic parsing (DT_JMPREL, DT_SYMTAB, ...)
 │   ├── mem.c/h          RWX page allocation, near allocation
@@ -94,7 +117,12 @@ bash scripts/test.sh
 │   ├── test_inline_hook.c
 │   ├── test_plt_hook.c
 │   ├── test_toyhook.c
+│   ├── test_trace.c
 │   └── android/log.h    Mock for __android_log_print
+├── docs/
+│   ├── usage-guide.md       Usage guide (Chinese)
+│   ├── usage-guide.en.md    Usage guide (English)
+│   └── plan.md              Feature roadmap
 └── scripts/
     ├── build.sh         Cross-compile for Android + optional push
     ├── test.sh          Build and run host tests
@@ -171,11 +199,39 @@ toy_hook_enable(hook);
 When a hooked function is called:
 
 1. Assembly stub saves `x0`-`x7`, calls `toy_dispatch(hook, args, 8)`
-2. **BEFORE** handlers run (can inspect/modify arguments)
-3. **REPLACE** handlers run (can set `skip_original` and `ret_val`)
-4. If `skip_original` is not set, original function is called
-5. **AFTER** handlers run (can inspect/modify return value)
-6. Return value goes back to caller
+2. Re-entrant check: if already dispatching on this thread, skip handlers and call original directly
+3. **BEFORE** handlers run (can inspect/modify arguments)
+4. **REPLACE** handlers run (can set `skip_original` and `ret_val`)
+5. If `skip_original` is not set, original function is called
+6. **AFTER** handlers run (can inspect/modify return value)
+7. Return value goes back to caller
+
+### Tracer
+
+```c
+toy_tracer_t *tracer = toy_tracer_create(1024);
+toy_tracer_attach(tracer, hook);
+```
+
+Events are recorded to a lock-free ring buffer. Query at runtime:
+
+```bash
+toyhookctl dump    # dump all recorded events
+toyhookctl count   # show event count and dropped count
+```
+
+### Control channel
+
+The payload starts a UDS server on an abstract namespace socket. Connect with `toyhookctl`:
+
+```
+Commands: dump | status | count | help | quit
+```
+
+- `status` — print all hooks and their state
+- `count`  — show tracer event/dropped counts
+- `dump`   — dump all recorded trace events
+- `quit`   — disconnect
 
 ### Query and control
 
@@ -203,6 +259,14 @@ ARM64 instructions are generated via small encoding functions (`emit_stp_pre`, `
 ### Dispatch stub (per-hook)
 
 Each hook gets its own small assembly page that saves callee-saved registers, loads the hook pointer and `toy_dispatch` address via LDR literal, and calls into C. This avoids a global indirect branch table.
+
+### Re-entrant dispatch
+
+`toy_dispatch` uses a thread-local depth counter. If a handler (or the original function) triggers the same hook recursively, the nested invocation skips all handlers and calls the original function directly. Users never need to worry about recursive dispatch protection.
+
+### Abstract UDS control channel
+
+On Android, untrusted apps can't create TCP sockets (seccomp) or filesystem sockets (SELinux cross-UID). The control server uses abstract namespace UDS (`AF_UNIX` with `sun_path[0] = '\0'`) which bypasses both restrictions, allowing `adb shell` to connect.
 
 ## Testing
 

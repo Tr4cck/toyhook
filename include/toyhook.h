@@ -2,6 +2,8 @@
 #define TOYHOOK_H
 
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 
 typedef struct toy_session toy_session_t;
 typedef struct toy_hook toy_hook_t;
@@ -63,12 +65,18 @@ toy_hook_t *toy_hook_add(toy_session_t *s, const toy_target_t *t);
 int toy_hook_remove(toy_session_t *s, toy_hook_t *h);
 
 int toy_hook_on(toy_hook_t *h, const toy_handler_t *handler);
-int toy_hook_off(toy_hook_t *h, const char *name);
+void *toy_hook_off(toy_hook_t *h, const char *name);  /* returns user_data of removed handler, or NULL */
 
 int toy_hook_enable(toy_hook_t *h);
 int toy_hook_disable(toy_hook_t *h);
+unsigned long toy_hook_get_id(toy_hook_t *h);
 unsigned long toy_hook_get_hit_count(toy_hook_t *h);
 
 int toy_commit(toy_session_t *s);
+
+/* ── describe ─────────────────────────────────────────────────── */
+
+void toy_hook_describe(toy_hook_t *h, FILE *fp);
+void toy_session_describe(toy_session_t *s, FILE *fp);
 
 #endif

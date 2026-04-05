@@ -31,7 +31,6 @@
 #include <dlfcn.h>
 #include "inline_hook.h"
 #include "plt_hook.h"
-#include "utils/mem.h"
 #include "utils/log.h"
 #include "arch/arm64/dispatch.h"
 
@@ -197,8 +196,7 @@ toy_hook_t *toy_hook_add(toy_session_t *s, const toy_target_t *t) {
  * Swaps with the last element for O(1) removal (order doesn't matter).
  * Calls hook_cleanup() which disables the hook if active, then frees.
  */
-int toy_hook_remove(toy_session_t *s, toy_hook_t *h)
-{
+int toy_hook_remove(toy_session_t *s, toy_hook_t *h) {
     for (size_t i = 0; i < s->hook_count; i++) {
         if (s->hooks[i] == h) {
             s->hooks[i] = s->hooks[s->hook_count - 1];
@@ -237,8 +235,7 @@ static int handler_priority_cmp(const void *a, const void *b) {
  *
  * Returns 0 on success, -1 on failure.
  */
-int toy_hook_on(toy_hook_t *h, const toy_handler_t *handler)
-{
+int toy_hook_on(toy_hook_t *h, const toy_handler_t *handler) {
     if (!h || !handler || !handler->fn) return -1;
 
     if (h->handler_count >= h->handler_cap) {
@@ -256,24 +253,27 @@ int toy_hook_on(toy_hook_t *h, const toy_handler_t *handler)
 }
 
 /*
- * toy_hook_off — remove a handler by name.
+ * toy_hook_off — remove a handler by name, return its user_data.
  *
- * Uses swap-with-last for O(1) removal, then re-sorts.
- * Returns 0 on success, -1 if not found.
+ * Swap-with-last for O(1) removal, re-sort by priority.
+ * Returns the removed handler's user_data pointer (caller may free it),
+ * or NULL if no handler matched.
  */
-int toy_hook_off(toy_hook_t *h, const char *name) {
-    if (!h || !name) return -1;
+void *toy_hook_off(toy_hook_t *h, const char *name) {
+    if (!h || !name) return NULL;
 
     for (size_t i = 0; i < h->handler_count; i++) {
         if (h->handlers[i].name && strcmp(h->handlers[i].name, name) == 0) {
+            void *ud = h->handlers[i].user_data;
             h->handlers[i] = h->handlers[h->handler_count - 1];
             h->handler_count--;
-            qsort(h->handlers, h->handler_count, sizeof(toy_handler_t), handler_priority_cmp);
-            return 0;
+            qsort(h->handlers, h->handler_count,
+                  sizeof(toy_handler_t), handler_priority_cmp);
+            return ud;
         }
     }
     LOGE("handler '%s' not found", name);
-    return -1;
+    return NULL;
 }
 
 /* ── dispatch pipeline ─────────────────────────────────────────── */
@@ -377,6 +377,9 @@ static int toy_run_handlers(toy_callctx_t *ctx, unsigned phase) {
  *   5. Run TOY_PHASE_AFTER handlers   (inspect/modify return value)
  *   6. Return ctx.ret_val to the assembly stub → caller
  */
+
+static __thread int volatile g_dispatch_depth = 0;
+
 unsigned long toy_dispatch(toy_hook_t *h, unsigned long *args, unsigned argc) {
     toy_callctx_t ctx = {0};
     ctx.hook = h;
@@ -388,14 +391,19 @@ unsigned long toy_dispatch(toy_hook_t *h, unsigned long *args, unsigned argc) {
 
     __atomic_add_fetch(&h->hit_count, 1, __ATOMIC_RELAXED);
 
-    toy_run_handlers(&ctx, TOY_PHASE_BEFORE);
-    toy_run_handlers(&ctx, TOY_PHASE_REPLACE);
+    g_dispatch_depth++;
+    if (g_dispatch_depth == 1) {
+        toy_run_handlers(&ctx, TOY_PHASE_BEFORE);
+        toy_run_handlers(&ctx, TOY_PHASE_REPLACE);
 
-    if (!ctx.skip_original)
+        if (!ctx.skip_original)
+            ctx.ret_val = toy_call_original(&ctx);
+
+        toy_run_handlers(&ctx, TOY_PHASE_AFTER);
+    } else {
         ctx.ret_val = toy_call_original(&ctx);
-
-    toy_run_handlers(&ctx, TOY_PHASE_AFTER);
-
+    }
+    g_dispatch_depth--;
     return ctx.ret_val;
 }
 
@@ -471,6 +479,10 @@ int toy_hook_disable(toy_hook_t *h) {
 
 /* ── query ────────────────────────────────────────────────────── */
 
+unsigned long toy_hook_get_id(toy_hook_t *h) {
+    return h ? h->id : 0;
+}
+
 unsigned long toy_hook_get_hit_count(toy_hook_t *h) {
     return h ? __atomic_load_n(&h->hit_count, __ATOMIC_RELAXED) : 0;
 }
@@ -497,4 +509,100 @@ int toy_commit(toy_session_t *s) {
     }
     LOGD("commit on session %p", (void *)s);
     return 0;
+}
+
+/* ── describe ─────────────────────────────────────────────────── */
+
+/*
+ * toy_hook_describe — pretty-print hook state to a FILE.
+ *
+ *
+ * Format:
+ *
+ *   Hook #3
+ *     target       : libc.so!open
+ *     backend      : inline
+ *     patched_len  : 16
+ *     trampoline   : 0x7f...
+ *     original     : 0x7f...
+ *     enabled      : yes
+ *     hits         : 281
+ *
+ *     handlers:
+ *       [10] log_before      BEFORE
+ *       [20] deny_secret     BEFORE
+ *       [30] log_after       AFTER
+ *
+ * Data sources (all from toy_hook_t directly):
+ *   - h->id, h->target.backend, h->resolved_addr, h->original_addr
+ *   - h->dispatch_stub, h->enabled, h->hit_count
+ *   - h->target.by_symbol.module / .symbol  (PLT)
+ *   - h->handlers[i].priority / .phases / .name  (handler chain)
+ *   - h->hit_count via __atomic_load_n
+ *   - For inline: use hook_inline_get_insns(h->original_addr, out)
+ *     to get the original instructions, patched_len = 16
+ *   - For PLT: patched_len = sizeof(void*)
+ *   - For inline also dump original instructions as hex
+ */
+void toy_hook_describe(toy_hook_t *h, FILE *fp) {
+    if (!h || !fp) return;
+
+    const char *backend_str = h->target.backend == TOY_BACKEND_INLINE ? "inline" :
+                          h->target.backend == TOY_BACKEND_PLT ? "plt" : "unknown";
+    fprintf(fp, "Hook #%lu\n", h->id);
+    fprintf(fp, "\t%-14s: ", "target");
+    if (h->target.backend == TOY_BACKEND_INLINE) {
+        fprintf(fp, "%p\n", h->resolved_addr);
+    } else if (h->target.backend == TOY_BACKEND_PLT) {
+        fprintf(fp, "%s!%s\n", h->target.by_symbol.module, h->target.by_symbol.symbol);
+    } else {
+        fprintf(fp, "unknown backend %d\n", h->target.backend);
+    }
+    fprintf(fp, "\t%-14s: %s\n", "backend", backend_str);
+    if (h->target.backend == TOY_BACKEND_INLINE) {
+        fprintf(fp, "\t%-14s: 16\n", "patched_len");
+        uint32_t orig_insns[4];
+        if (hook_inline_get_insns(h->original_addr, orig_insns) == 4) {
+            fprintf(fp, "\t%-14s: %p\n", "original", h->original_addr);
+            fprintf(fp, "\t%-14s: %p\n", "trampoline", h->dispatch_stub);
+            fprintf(fp, "\t%-14s: %s\n", "enabled", h->enabled ? "yes" : "no");
+            fprintf(fp, "\t%-14s: %lu\n", "hits", __atomic_load_n(&h->hit_count, __ATOMIC_RELAXED));
+            fprintf(fp, "\t%-14s: %08x %08x %08x %08x\n", "orig insns",
+                    orig_insns[0], orig_insns[1], orig_insns[2], orig_insns[3]);
+        } else {
+            fprintf(fp, "\t%-14s: (not enabled)\n", "state");
+        }
+    } else if (h->target.backend == TOY_BACKEND_PLT) {
+        fprintf(fp, "\t%-14s: %zu\n", "patched_len", sizeof(void *));
+        fprintf(fp, "\t%-14s: %p\n", "original", h->original_addr);
+        fprintf(fp, "\t%-14s: %s\n", "enabled", h->enabled ? "yes" : "no");
+        fprintf(fp, "\t%-14s: %lu\n", "hits", __atomic_load_n(&h->hit_count, __ATOMIC_RELAXED));
+    } else {
+        fprintf(fp, "\tunknown backend, cannot describe\n");
+    }
+    fprintf(fp, "\t%-14s:\n", "handlers");
+    for (size_t i = 0; i < h->handler_count; i++) {
+        toy_handler_t *hd = &h->handlers[i];
+        fprintf(fp, "\t  [%d] %-12s %s%s%s\n",
+                hd->priority,
+                hd->name ? hd->name : "?",
+                (hd->phases & TOY_PHASE_BEFORE) ? "BEFORE " : "",
+                (hd->phases & TOY_PHASE_AFTER) ? "AFTER " : "",
+                (hd->phases & TOY_PHASE_REPLACE) ? "REPLACE" : "");
+    }
+}
+
+/*
+ * toy_session_describe — pretty-print all hooks in a session.
+ *
+ *
+ * Iterate s->hooks[], call toy_hook_describe for each, add separator.
+ */
+void toy_session_describe(toy_session_t *s, FILE *fp) {
+    if (!s) return;
+
+    for (size_t i = 0; i < s->hook_count; i++) {
+        toy_hook_describe(s->hooks[i], fp);
+        fprintf(fp, "-------------------------\n");
+    }
 }

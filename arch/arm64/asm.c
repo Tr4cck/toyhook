@@ -4,8 +4,7 @@
 #include "utils/log.h"
 
 int relocate_instruction(uint32_t *dst, uint32_t insn,
-                         unsigned long orig_pc, unsigned long new_pc)
-{
+                         unsigned long orig_pc, unsigned long new_pc) {
     if ((insn & 0x9F000000) == 0x90000000) {
         uint32_t immlo = (insn >> 29) & 0x3;
         uint32_t immhi = (insn >> 5) & 0x7FFFF;

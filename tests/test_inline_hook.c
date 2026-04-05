@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -799,9 +798,8 @@ int main(void)
     RUN_TEST(unhook_wrong_target_fails);
     RUN_TEST(hook_with_adrp);
 
-    // TODO: enable after implementing alloc_rwx_near
-    // RUN_TEST(near_alloc_basic);
-    // RUN_TEST(hook_with_tbz_near);
+    RUN_TEST(near_alloc_basic);
+    RUN_TEST(hook_with_tbz_near);
 
     printf("\n%d/%d passed, %d failed\n",
            __tf_pass, __tf_total, __tf_fail);

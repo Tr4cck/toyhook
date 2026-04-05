@@ -1,7 +1,6 @@
 #ifndef TOYHOOK_TEST_FRAMEWORK_H
 #define TOYHOOK_TEST_FRAMEWORK_H
 
-#include <stdio.h>
 #include <stdint.h>
 
 static int __tf_total, __tf_pass, __tf_fail;

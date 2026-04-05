@@ -105,9 +105,7 @@ bool is_addr_in_gap(unsigned long addr, struct mapping *mappings, size_t count) 
 }
 
 void *alloc_rwx_near(size_t size, size_t near_addr) {
-    /* TODO: implement near allocation
-     *
-     * Goal: allocate an RWX page within ±128MB of near_addr so that
+    /* Goal: allocate an RWX page within ±128MB of near_addr so that
      * PC-relative instructions in stolen code can reach their targets.
      *
      * Algorithm outline:

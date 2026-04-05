@@ -18,8 +18,7 @@ struct trampoline_header {
     size_t mapped_size;
 };
 
-int hook_inline(void *target, void *replacement, void **original)
-{
+int hook_inline(void *target, void *replacement, void **original) {
     if ((uintptr_t)target % 4 != 0) {
         LOGE("target %p is not 4-byte aligned", target);
         return -1;
@@ -72,8 +71,7 @@ int hook_inline(void *target, void *replacement, void **original)
     return 0;
 }
 
-int unhook_inline(void *target, void *trampoline)
-{
+int unhook_inline(void *target, void *trampoline) {
     struct trampoline_header *hdr = (struct trampoline_header *)((uint8_t *)trampoline - HEADER_SIZE);
     if (hdr->target != target) {
         LOGE("trampoline target mismatch: expected %p, got %p", target, hdr->target);
@@ -91,4 +89,17 @@ int unhook_inline(void *target, void *trampoline)
     restore_page_perms((uintptr_t)target, ps, orig_prot);
     munmap(hdr, hdr->mapped_size);
     return 0;
+}
+
+int hook_inline_get_insns(void *original, uint32_t out[4]) {
+    if (!original || !out) return -1;
+
+    struct trampoline_header *hdr =
+        (struct trampoline_header *)((uint8_t *)original - HEADER_SIZE);
+    if (!hdr->target) return -1;
+
+    for (int i = 0; i < STOLEN_COUNT; i++)
+        out[i] = hdr->orig_insns[i];
+
+    return STOLEN_COUNT;
 }

@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
 #include <elf.h>
@@ -82,6 +81,16 @@ void free_dispatch_stub(void *stub, toy_hook_t *h) {
     (void)stub; (void)h;
 }
 
+static int stub_get_insns_ret = -1;
+static uint32_t stub_get_insns_out[4] = {0};
+
+int hook_inline_get_insns(void *original, uint32_t out[4]) {
+    (void)original;
+    if (stub_get_insns_ret < 0) return -1;
+    for (int i = 0; i < 4; i++) out[i] = stub_get_insns_out[i];
+    return stub_get_insns_ret;
+}
+
 static void reset_stubs(void) {
     stub_hook_inline_ret = 0;
     stub_hook_inline_target = NULL;
@@ -96,6 +105,8 @@ static void reset_stubs(void) {
     stub_dynamic_section = &stub_dyn;
     stub_got_slot_ret = -1;
     stub_alloc_dispatch_val = (void*)0xCAFE;
+    stub_get_insns_ret = -1;
+    memset(stub_get_insns_out, 0, sizeof(stub_get_insns_out));
 }
 
 /* ── include code under test ──────────────────────────────── */
@@ -862,6 +873,14 @@ TEST(session_destroy_cleans_enabled_hooks) {
     return 0;
 }
 
+/* ── describe tests ──────────────────────────────────────────── */
+
+TEST(describe_null_safe) {
+    toy_hook_describe(NULL, stderr);
+    toy_session_describe(NULL, stderr);
+    return 0;
+}
+
 /* ── main ─────────────────────────────────────────────────── */
 
 int main(void) {
@@ -925,6 +944,8 @@ int main(void) {
     RUN_TEST(enable_stub_alloc_fails);
     RUN_TEST(disable_plt_calls_unhook);
     RUN_TEST(session_destroy_cleans_enabled_hooks);
+
+    RUN_TEST(describe_null_safe);
 
     printf("\n%d/%d passed, %d failed\n", __tf_pass, __tf_total, __tf_fail);
     return __tf_fail > 0 ? 1 : 0;

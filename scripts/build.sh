@@ -39,11 +39,12 @@ cmake -B "$BUILD_DIR" \
     -S "$SCRIPT_DIR/.."
 cmake --build "$BUILD_DIR"
 
-echo "[+] built: toyhook libtoyhook_payload.so"
+echo "[+] built: toyhook libtoyhook_payload.so toyhookctl"
 
 if [[ "$DO_PUSH" -eq 1 ]]; then
     echo "[*] pushing to device..."
     adb push "$BUILD_DIR/toyhook" "$REMOTE_DIR/"
     adb push "$BUILD_DIR/libtoyhook_payload.so" "$REMOTE_DIR/"
+    adb push "$BUILD_DIR/toyhookctl" "$REMOTE_DIR/"
     echo "[+] pushed to $REMOTE_DIR/"
 fi
