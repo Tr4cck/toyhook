@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Remote Android",
+            "type": "lldb-dap",
+            "request": "attach",
+            "program": "${workspaceFolder}/build/toyhook",
+            "attachCommands": [
+                "gdb-remote localhost:1234"
+            ]
+        }
+    ]
+}
