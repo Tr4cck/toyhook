@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/../build-test"
 
 cmake -B "$BUILD_DIR" -S "$SCRIPT_DIR/.." -DBUILD_TESTS=ON > /dev/null
-cmake --build "$BUILD_DIR" --target test_inline_hook --target test_toyhook --target test_plt_hook > /dev/null
 
-echo "inline_hook tests:"
-"$BUILD_DIR/test_inline_hook" "$@"
+TARGETS=(test_inline_hook test_toyhook test_plt_hook test_trace)
+cmake --build "$BUILD_DIR" ${TARGETS/#/--target } > /dev/null
 
-echo ""
-echo "toyhook framework tests:"
-"$BUILD_DIR/test_toyhook" "$@"
+FAIL=0
+for t in "${TARGETS[@]}"; do
+    echo "[$t]"
+    "$BUILD_DIR/$t" "$@" || FAIL=1
+    echo ""
+done
 
-echo ""
-echo "PLT hook tests:"
-"$BUILD_DIR/test_plt_hook" "$@"
+if [ "$FAIL" -eq 0 ]; then
+    echo "all tests passed."
+else
+    echo "some tests failed."
+    exit 1
+fi

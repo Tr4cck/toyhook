@@ -8,8 +8,8 @@ A teaching-oriented function hooking framework for ARM64 Android. It exposes int
 - **Inline hook** — patches function prologues with a branch to a replacement, relocates stolen instructions into a trampoline
 - **PLT/GOT hook** — rewrites GOT entries to intercept dynamic symbol calls
 - **Unified dispatch** — a single pipeline routes all hooked calls through before/replace/after handler chains
-- **Ring-buffer tracer** — records enter/leave events with args and return values, queryable on-demand
-- **UDS control channel** — interactive `toyhookctl` CLI for querying hook status and trace data at runtime
+- **Ring-buffer tracer** — records enter/leave events with args, return values, and call duration, queryable on-demand
+- **UDS control channel** — interactive `toyhookctl` REPL for querying hook status, streaming trace events, and live watch with filtering
 - **Re-entrant safe** — recursive hook invocation (e.g. handler calls a function that triggers the same hook) is transparently handled by the dispatch pipeline
 
 **What it doesn't do:**
@@ -40,9 +40,18 @@ adb shell toyhook inject <pid> /data/local/tmp/libtoyhook_payload.so
 ### Query hooks at runtime
 
 ```bash
+# One-shot commands (for scripting)
 adb shell toyhookctl status
 adb shell toyhookctl count
 adb shell toyhookctl dump
+adb shell toyhookctl "watch hook=1"
+
+# Interactive REPL
+adb shell toyhookctl
+toyhook> status
+toyhook> watch hook=1
+toyhook> dump
+toyhook> quit
 ```
 
 ### Run host tests
@@ -87,7 +96,7 @@ bash scripts/test.sh
 ```
 .
 ├── arch/arm64/          ARM64 low-level primitives
-│   ├── emit.c/h         Instruction encoding (STP, LDP, B, BL, LDR literal, ...)
+│   ├── emit.c/h         Instruction encoding (STP, LDP_post, B, BL, LDR literal, ...)
 │   ├── asm.c/h          Instruction relocation (PC-relative fixup)
 │   └── dispatch.c/h     Per-hook assembly stub (save x0-x7, call toy_dispatch)
 ├── backend/
@@ -113,7 +122,7 @@ bash scripts/test.sh
 │   ├── elf.c/h          ELF .dynamic parsing (DT_JMPREL, DT_SYMTAB, ...)
 │   ├── mem.c/h          RWX page allocation, near allocation
 │   └── log.h            Logging macros
-├── tests/               102 host unit tests
+├── tests/               119 host unit tests
 │   ├── test_inline_hook.c
 │   ├── test_plt_hook.c
 │   ├── test_toyhook.c
@@ -121,8 +130,7 @@ bash scripts/test.sh
 │   └── android/log.h    Mock for __android_log_print
 ├── docs/
 │   ├── usage-guide.md       Usage guide (Chinese)
-│   ├── usage-guide.en.md    Usage guide (English)
-│   └── plan.md              Feature roadmap
+│   └── usage-guide.en.md    Usage guide (English)
 └── scripts/
     ├── build.sh         Cross-compile for Android + optional push
     ├── test.sh          Build and run host tests
@@ -170,7 +178,7 @@ static int log_args(toy_callctx_t *ctx, void *ud) {
 static int deny_access(toy_callctx_t *ctx, void *ud) {
     const char *path = (const char *)ctx->args[0];
     if (path && strstr(path, "secret")) {
-        ctx->ret_val = (unsigned long)-1;
+        ctx->ret_val = (uint64_t)-1;
         ctx->skip_original = 1;
     }
     return 0;
@@ -213,7 +221,7 @@ toy_tracer_t *tracer = toy_tracer_create(1024);
 toy_tracer_attach(tracer, hook);
 ```
 
-Events are recorded to a lock-free ring buffer. Query at runtime:
+Events are recorded to a lock-free ring buffer. Each LEAVE event carries a `duration` (elapsed ns from the matching ENTER). Query at runtime:
 
 ```bash
 toyhookctl dump    # dump all recorded events
@@ -225,18 +233,21 @@ toyhookctl count   # show event count and dropped count
 The payload starts a UDS server on an abstract namespace socket. Connect with `toyhookctl`:
 
 ```
-Commands: dump | status | count | help | quit
+Commands: dump | status | count | watch [hook=N] [tid=N] | help | quit
 ```
 
 - `status` — print all hooks and their state
 - `count`  — show tracer event/dropped counts
 - `dump`   — dump all recorded trace events
+- `watch [hook=N] [tid=N]` — live-stream trace events, optional filter by hook id or thread id
 - `quit`   — disconnect
+
+`toyhookctl` can run as a one-shot command (`toyhookctl dump`) or as an interactive REPL (`toyhookctl` with no args).
 
 ### Query and control
 
 ```c
-unsigned long hits = toy_hook_get_hit_count(hook);
+uint64_t hits = toy_hook_get_hit_count(hook);
 toy_hook_disable(hook);
 toy_hook_remove(sess, hook);
 toy_commit(sess);   // enable all hooks with handlers
@@ -258,7 +269,7 @@ ARM64 instructions are generated via small encoding functions (`emit_stp_pre`, `
 
 ### Dispatch stub (per-hook)
 
-Each hook gets its own small assembly page that saves callee-saved registers, loads the hook pointer and `toy_dispatch` address via LDR literal, and calls into C. This avoids a global indirect branch table.
+Each hook gets its own small assembly page that saves argument registers (x0-x7) and frame registers (FP, LR), loads the hook pointer and `toy_dispatch` address via LDR literal, and calls into C. This avoids a global indirect branch table.
 
 ### Re-entrant dispatch
 
@@ -270,11 +281,12 @@ On Android, untrusted apps can't create TCP sockets (seccomp) or filesystem sock
 
 ## Testing
 
-102 host-side unit tests covering:
+119 host-side unit tests covering:
 - Instruction encoding and decoding
 - PC-relative instruction relocation (all branch types, ADRP, LDR literal)
 - Trampoline generation
 - Dispatch pipeline (before/replace/after handlers, skip_original, hit count)
+- Tracer (enter/leave events, duration tracking, ring buffer)
 - PLT/GOT hooking (ELF parsing, GOT patching, roundtrip)
 - Near allocation
 

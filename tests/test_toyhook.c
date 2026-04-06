@@ -309,15 +309,15 @@ TEST(hook_off_not_found) {
     toy_hook_t *h = toy_hook_add(s, &t);
     toy_handler_t hd = { .fn = dummy_handler, .name = "real" };
     toy_hook_on(h, &hd);
-    ASSERT_INT(toy_hook_off(h, "ghost"), -1);
+    ASSERT_TRUE(toy_hook_off(h, "ghost") == NULL);
     ASSERT_INT(h->handler_count, 1);
     toy_session_destroy(s);
     return 0;
 }
 
 TEST(hook_off_null_args_rejected) {
-    ASSERT_INT(toy_hook_off(NULL, "x"), -1);
-    ASSERT_INT(toy_hook_off((toy_hook_t*)1, NULL), -1);
+    ASSERT_TRUE(toy_hook_off(NULL, "x") == NULL);
+    ASSERT_TRUE(toy_hook_off((toy_hook_t*)1, NULL) == NULL);
     return 0;
 }
 
@@ -876,8 +876,8 @@ TEST(session_destroy_cleans_enabled_hooks) {
 /* ── describe tests ──────────────────────────────────────────── */
 
 TEST(describe_null_safe) {
-    toy_hook_describe(NULL, stderr);
-    toy_session_describe(NULL, stderr);
+    toy_hook_describe(NULL, fileno(stderr));
+    toy_session_describe(NULL, fileno(stderr));
     return 0;
 }
 

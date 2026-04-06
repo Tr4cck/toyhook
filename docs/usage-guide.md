@@ -97,7 +97,7 @@ static int before_open(toy_callctx_t *ctx, void *ud) {
     LOG("open(\"%s\", 0x%x)", path, flags);
 
     // 可以修改参数
-    // ctx->args[0] = (unsigned long)"/dev/null";
+    // ctx->args[0] = (uint64_t)"/dev/null";
 
     return 0;  // 继续执行
 }
@@ -116,7 +116,7 @@ static int replace_open(toy_callctx_t *ctx, void *ud) {
     int fd = orig((const char *)ctx->args[0], (int)ctx->args[1]);
     LOG("original open returned %d", fd);
 
-    ctx->ret_val = (unsigned long)fd;
+    ctx->ret_val = (uint64_t)fd;
     ctx->skip_original = 1;  // 告诉 dispatch 不要再调原始函数了
     return 0;
 }
@@ -171,9 +171,9 @@ struct toy_callctx {
     void *target_addr;         // 被 hook 的地址
     void *original_addr;       // 原始函数地址（用于调用原函数）
 
-    unsigned long args[8];     // 函数参数（x0-x7）
+    uint64_t args[8];          // 函数参数（x0-x7）
     unsigned argc;             // 参数数量
-    unsigned long ret_val;     // 返回值
+    uint64_t ret_val;          // 返回值
 
     int skip_original;         // 设为 1 跳过原始函数调用
 };
@@ -194,13 +194,14 @@ toy_tracer_attach(tracer, hook);
 
 ```c
 typedef struct {
-    unsigned long timestamp;
-    unsigned long hook_id;
-    unsigned long thread_id;
-    unsigned long args[TOY_MAX_ARGS];
-    unsigned argc;
-    unsigned long ret_val;
-    unsigned kind;       // TOY_TRACE_ENTER 或 TOY_TRACE_LEAVE
+    uint64_t timestamp;     // 事件时间戳（ns）
+    uint64_t duration;      // 耗时（ENTER 为 0，LEAVE 为与匹配 ENTER 之间的间隔）
+    uint64_t hook_id;
+    uint64_t thread_id;
+    uint64_t args[TOY_MAX_ARGS];
+    uint32_t argc;
+    uint64_t ret_val;
+    uint32_t kind;          // TOY_TRACE_ENTER 或 TOY_TRACE_LEAVE
 } trace_event_t;
 ```
 
@@ -214,7 +215,7 @@ size_t dropped = toy_tracer_dropped(tracer);
 ### 导出
 
 ```c
-toy_tracer_dump(tracer, stderr);   // 导出到任意 FILE*
+toy_tracer_dump(tracer, fileno(stderr));   // 导出到任意 fd
 ```
 
 ### 启停
@@ -246,6 +247,8 @@ pthread_detach(tid);
 
 ### 使用 toyhookctl
 
+单次执行（适合脚本调用）：
+
 ```bash
 adb shell toyhookctl status   # 打印所有 hook 的状态
 adb shell toyhookctl count    # 显示事件数和丢弃数
@@ -254,14 +257,35 @@ adb shell toyhookctl help     # 列出命令
 adb shell toyhookctl quit     # 断开连接
 ```
 
+交互式 REPL 模式：
+
+```bash
+adb shell toyhookctl
+toyhook> status
+Hook #1
+    target       : libmyapplication.so!__system_property_get
+    backend      : plt
+    ...
+OK
+toyhook> watch hook=1
+WATCHING
+ENTER  hook=1 tid=12345 args=[0x7f...] dur=0 @ 1234567890
+LEAVE  hook=1 tid=12345 ret=0x42 dur=1200ns @ 1234567900
+^C
+STOPPED
+toyhook> quit
+bye
+OK
+```
+
 ### 协议
 
 基于文本行协议，通过抽象 UDS 通信：
 
 ```
 > dump
-ENTER  hook=1 tid=12345 args=[0x7f...] @ 1234567890
-LEAVE  hook=1 tid=12345 ret=0x42 @ 1234567900
+ENTER  hook=1 tid=12345 args=[0x7f...] dur=0 @ 1234567890
+LEAVE  hook=1 tid=12345 ret=0x42 dur=1200ns @ 1234567900
 OK
 
 > status
@@ -273,6 +297,14 @@ OK
 
 > count
 events=256 dropped=3
+OK
+
+> watch hook=1 tid=12345
+WATCHING
+ENTER  hook=1 tid=12345 args=[0x7f...] dur=0 @ 1234567890
+LEAVE  hook=1 tid=12345 ret=0x42 dur=1200ns @ 1234567900
+> stop
+STOPPED
 OK
 ```
 
@@ -336,7 +368,7 @@ static int on_prop_get(toy_callctx_t *ctx, void *ud) {
 
     LOGI("__system_property_get(\"%s\") = \"%s\" (%d)", name, value, res);
 
-    ctx->ret_val = (unsigned long)res;
+    ctx->ret_val = (uint64_t)res;
     ctx->skip_original = 1;
     return 0;
 }
@@ -368,7 +400,7 @@ static void on_load(void) {
         toy_tracer_attach(g_tracer, hook);
 
     toy_commit(g_sess);
-    toy_session_describe(g_sess, stderr);
+    toy_session_describe(g_sess, fileno(stderr));
 
     static toyhook_server_ctx_t server_ctx = {0};
     server_ctx.session = g_sess;
@@ -385,4 +417,5 @@ static void on_load(void) {
 ./toyhook inject <pid> /data/local/tmp/libyour_payload.so
 toyhookctl status
 toyhookctl dump
+toyhookctl watch
 ```

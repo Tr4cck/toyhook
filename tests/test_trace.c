@@ -1,13 +1,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "trace.h"
 #include "test_framework.h"
 
+static int dump_to_buf(toy_tracer_t *t, char *buf, size_t bufsz) {
+    int pfd[2];
+    if (pipe(pfd) < 0) return -1;
+    toy_tracer_dump(t, pfd[1]);
+    close(pfd[1]);
+    ssize_t n = read(pfd[0], buf, bufsz - 1);
+    close(pfd[0]);
+    if (n < 0) return -1;
+    buf[n] = '\0';
+    return 0;
+}
+
 /* ── stubs for toyhook API ─────────────────────────────── */
 
-static unsigned long stub_hook_id = 1;
-unsigned long toy_hook_get_id(toy_hook_t *h) {
+static uint64_t stub_hook_id = 1;
+uint64_t toy_hook_get_id(toy_hook_t *h) {
     (void)h;
     return stub_hook_id;
 }
@@ -80,18 +93,18 @@ TEST(tracer_record_single) {
 TEST(tracer_record_wraps) {
     toy_tracer_t *t = toy_tracer_create(4);
     for (int i = 0; i < 6; i++) {
-        trace_event_t ev = { .kind = TOY_TRACE_ENTER, .hook_id = (unsigned long)i };
+        trace_event_t ev = { .kind = TOY_TRACE_ENTER, .hook_id = (uint64_t)i };
         tracer_record(t, &ev);
     }
     ASSERT_INT((int)t->head, 6);
     ASSERT_INT((int)toy_tracer_count(t), 4);
     ASSERT_INT((int)toy_tracer_dropped(t), 2);
 
-    size_t idx = t->head & t->mask;
-    ASSERT_INT((int)t->events[idx].hook_id, 4);
-    ASSERT_INT((int)t->events[(idx + 1) & t->mask].hook_id, 5);
-    ASSERT_INT((int)t->events[(idx + 2) & t->mask].hook_id, 2);
-    ASSERT_INT((int)t->events[(idx + 3) & t->mask].hook_id, 3);
+    size_t oldest = (t->head - t->capacity) & t->mask;
+    ASSERT_INT((int)t->events[oldest].hook_id, 2);
+    ASSERT_INT((int)t->events[(oldest + 1) & t->mask].hook_id, 3);
+    ASSERT_INT((int)t->events[(oldest + 2) & t->mask].hook_id, 4);
+    ASSERT_INT((int)t->events[(oldest + 3) & t->mask].hook_id, 5);
 
     toy_tracer_destroy(t);
     return 0;
@@ -172,9 +185,7 @@ TEST(tracer_dump_output) {
     tracer_record(t, &ev2);
 
     char buf[1024] = {0};
-    FILE *fp = fmemopen(buf, sizeof(buf), "w");
-    toy_tracer_dump(t, fp);
-    fclose(fp);
+    dump_to_buf(t, buf, sizeof(buf));
 
     ASSERT_TRUE(strstr(buf, "ENTER") != NULL);
     ASSERT_TRUE(strstr(buf, "LEAVE") != NULL);
@@ -189,14 +200,12 @@ TEST(tracer_dump_output) {
 TEST(tracer_dump_dropped) {
     toy_tracer_t *t = toy_tracer_create(2);
     for (int i = 0; i < 5; i++) {
-        trace_event_t ev = { .kind = TOY_TRACE_ENTER, .hook_id = (unsigned long)i };
+        trace_event_t ev = { .kind = TOY_TRACE_ENTER, .hook_id = (uint64_t)i };
         tracer_record(t, &ev);
     }
 
     char buf[1024] = {0};
-    FILE *fp = fmemopen(buf, sizeof(buf), "w");
-    toy_tracer_dump(t, fp);
-    fclose(fp);
+    dump_to_buf(t, buf, sizeof(buf));
 
     ASSERT_TRUE(strstr(buf, "Dropped") != NULL);
     toy_tracer_destroy(t);
@@ -204,8 +213,8 @@ TEST(tracer_dump_dropped) {
 }
 
 TEST(tracer_dump_null_safe) {
-    toy_tracer_dump(NULL, stdout);
-    toy_tracer_dump(NULL, NULL);
+    toy_tracer_dump(NULL, fileno(stdout));
+    toy_tracer_dump(NULL, -1);
     return 0;
 }
 

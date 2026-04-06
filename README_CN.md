@@ -8,8 +8,8 @@
 - **Inline hook** — 改写函数入口，把被覆盖的指令搬到 trampoline
 - **PLT/GOT hook** — 改写 GOT 表项，拦截动态符号调用
 - **统一 dispatch** — 所有被 hook 的调用经过同一个 before/replace/after handler 链
-- **环形缓冲区追踪器** — 记录 enter/leave 事件及参数和返回值，支持按需查询
-- **UDS 控制通道** — 通过 `toyhookctl` CLI 实时查询 hook 状态和追踪数据
+- **环形缓冲区追踪器** — 记录 enter/leave 事件及参数、返回值和调用耗时，支持按需查询
+- **UDS 控制通道** — 通过 `toyhookctl` REPL 实时查询 hook 状态、流式追踪事件，支持过滤的实时 watch
 - **重入安全** — handler 中递归触发同一 hook 时（如 handler 调用的函数又走了被 hook 的符号），dispatch 管线自动跳过 handler、直接调用原函数，用户无需关心
 
 **不能做什么：**
@@ -40,9 +40,18 @@ adb shell toyhook inject <pid> /data/local/tmp/libtoyhook_payload.so
 ### 运行时查询
 
 ```bash
+# 单次命令（适合脚本调用）
 adb shell toyhookctl status
 adb shell toyhookctl count
 adb shell toyhookctl dump
+adb shell toyhookctl "watch hook=1"
+
+# 交互式 REPL
+adb shell toyhookctl
+toyhook> status
+toyhook> watch hook=1
+toyhook> dump
+toyhook> quit
 ```
 
 ### 运行本地测试
@@ -87,7 +96,7 @@ bash scripts/test.sh
 ```
 .
 ├── arch/arm64/          ARM64 底层原语
-│   ├── emit.c/h         指令编码 (STP, LDP, B, BL, LDR literal, ...)
+│   ├── emit.c/h         指令编码 (STP, LDP_post, B, BL, LDR literal, ...)
 │   ├── asm.c/h          指令重定位 (PC-relative 修正)
 │   └── dispatch.c/h     每个 hook 的汇编 stub (保存 x0-x7, 调用 toy_dispatch)
 ├── backend/
@@ -113,7 +122,7 @@ bash scripts/test.sh
 │   ├── elf.c/h          ELF .dynamic 解析 (DT_JMPREL, DT_SYMTAB, ...)
 │   ├── mem.c/h          RWX 页分配、就近分配
 │   └── log.h            日志宏
-├── tests/               102 个本地单元测试
+├── tests/               119 个本地单元测试
 │   ├── test_inline_hook.c
 │   ├── test_plt_hook.c
 │   ├── test_toyhook.c
@@ -121,8 +130,7 @@ bash scripts/test.sh
 │   └── android/log.h    __android_log_print 的 mock
 ├── docs/
 │   ├── usage-guide.md       使用指南（中文）
-│   ├── usage-guide.en.md    使用指南（英文）
-│   └── plan.md              功能路线图
+│   └── usage-guide.en.md    使用指南（英文）
 └── scripts/
     ├── build.sh         Android 交叉编译 + 可选推送到设备
     ├── test.sh          构建并运行本地测试
@@ -170,7 +178,7 @@ static int log_args(toy_callctx_t *ctx, void *ud) {
 static int deny_access(toy_callctx_t *ctx, void *ud) {
     const char *path = (const char *)ctx->args[0];
     if (path && strstr(path, "secret")) {
-        ctx->ret_val = (unsigned long)-1;
+        ctx->ret_val = (uint64_t)-1;
         ctx->skip_original = 1;
     }
     return 0;
@@ -213,7 +221,7 @@ toy_tracer_t *tracer = toy_tracer_create(1024);
 toy_tracer_attach(tracer, hook);
 ```
 
-事件记录到无锁环形缓冲区，运行时查询：
+事件记录到无锁环形缓冲区，每个 LEAVE 事件携带 `duration`（与匹配 ENTER 之间的耗时，单位 ns）。运行时查询：
 
 ```bash
 toyhookctl dump    # 导出所有记录的事件
@@ -225,18 +233,21 @@ toyhookctl count   # 显示事件数和丢弃数
 payload 启动后会在抽象命名空间 UDS 上监听，用 `toyhookctl` 连接：
 
 ```
-Commands: dump | status | count | help | quit
+Commands: dump | status | count | watch [hook=N] [tid=N] | help | quit
 ```
 
 - `status` — 打印所有 hook 及其状态
 - `count`  — 显示追踪器事件数 / 丢弃数
 - `dump`   — 导出所有追踪事件
+- `watch [hook=N] [tid=N]` — 实时流式输出追踪事件，可选按 hook id 或线程 id 过滤
 - `quit`   — 断开连接
+
+`toyhookctl` 可以单次执行（`toyhookctl dump`），也可以作为交互式 REPL 运行（不带参数）。
 
 ### 查询与控制
 
 ```c
-unsigned long hits = toy_hook_get_hit_count(hook);
+uint64_t hits = toy_hook_get_hit_count(hook);
 toy_hook_disable(hook);
 toy_hook_remove(sess, hook);
 toy_commit(sess);   // 启用所有挂载了 handler 的 hook
@@ -258,7 +269,7 @@ ARM64 指令通过小型编码函数（`emit_stp_pre`、`emit_ldr_literal`、`em
 
 ### Dispatch stub（每个 hook 一个）
 
-每个 hook 分配独立的汇编页，保存 callee-saved 寄存器，通过 LDR literal 加载 hook 指针和 `toy_dispatch` 地址，然后进入 C 代码。避免了全局间接跳转表。
+每个 hook 分配独立的汇编页，保存参数寄存器（x0-x7）和帧寄存器（FP、LR），通过 LDR literal 加载 hook 指针和 `toy_dispatch` 地址，然后进入 C 代码。避免了全局间接跳转表。
 
 ### 重入 dispatch
 
@@ -270,11 +281,12 @@ Android 上，untrusted_app 无法创建 TCP socket（seccomp）和文件系统 
 
 ## 测试
 
-102 个本地单元测试，覆盖：
+119 个本地单元测试，覆盖：
 - 指令编码与解码
 - PC-relative 指令重定位（所有分支类型、ADRP、LDR literal）
 - Trampoline 生成
 - Dispatch 管线（before/replace/after handler、skip_original、hit count）
+- 追踪器（enter/leave 事件、调用耗时、环形缓冲区）
 - PLT/GOT hook（ELF 解析、GOT 改写、往返测试）
 - 就近分配
 
