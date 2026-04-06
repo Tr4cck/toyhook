@@ -16,17 +16,8 @@
 
 typedef struct trace_ctx {
     struct toy_tracer *tracer;
-    unsigned long hook_id;
+    uint64_t hook_id;
 } trace_ctx_t;
-
-struct toy_tracer {
-    trace_event_t *events;
-    size_t capacity;
-    size_t mask;
-    size_t head;
-    size_t dropped;
-    int enabled;
-};
 
 toy_tracer_t *toy_tracer_create(size_t capacity) {
     toy_tracer_t *t = calloc(1, sizeof(*t));
@@ -66,10 +57,10 @@ static void tracer_record(toy_tracer_t *t, const trace_event_t *ev) {
     t->events[pos & t->mask] = *ev;
 }
 
-static unsigned long tracer_now_ns(void) {
+static uint64_t tracer_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (unsigned long)ts.tv_sec * NSEC_PER_SEC + (unsigned long)ts.tv_nsec;
+    return (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
 /* ── handler pair ──────────────────────────────────────── */
@@ -79,10 +70,11 @@ static int trace_on_enter(toy_callctx_t *ctx, void *ud) {
     if (!tc->tracer->enabled) return 0;
 
     trace_event_t ev = {0};
-    ev.kind      = TOY_TRACE_ENTER;
+    ev.kind       = TOY_TRACE_ENTER;
     ev.hook_id    = tc->hook_id;
-    ev.thread_id  = (unsigned long)gettid();
+    ev.thread_id  = (uint64_t)gettid();
     ev.timestamp  = tracer_now_ns();
+    ev.duration   = 0; /* to be filled on leave */
     ev.argc       = ctx->argc;
     memcpy(ev.args, ctx->args, sizeof(ev.args));
     tracer_record(tc->tracer, &ev);
@@ -94,10 +86,20 @@ static int trace_on_leave(toy_callctx_t *ctx, void *ud) {
     if (!tc->tracer->enabled) return 0;
 
     trace_event_t ev = {0};
-    ev.kind      = TOY_TRACE_LEAVE;
+    ev.kind       = TOY_TRACE_LEAVE;
     ev.hook_id    = tc->hook_id;
-    ev.thread_id  = (unsigned long)gettid();
+    ev.thread_id  = (uint64_t)gettid();
     ev.timestamp  = tracer_now_ns();
+
+    toy_tracer_t *t = tc->tracer;
+    size_t start_idx = (t->head > t->capacity) ? (t->head - t->capacity) : 0;
+    for (size_t i = t->head; i > start_idx; i--) {
+        trace_event_t *e = &t->events[(i - 1) & t->mask];
+        if (e->hook_id == tc->hook_id && e->thread_id == ev.thread_id && e->kind == TOY_TRACE_ENTER) {
+            ev.duration = ev.timestamp - e->timestamp;
+            break;
+        }
+    }
     ev.argc       = ctx->argc;
     ev.ret_val    = ctx->ret_val;
     memcpy(ev.args, ctx->args, sizeof(ev.args));
@@ -175,8 +177,8 @@ size_t toy_tracer_dropped(const toy_tracer_t *t) {
  *
  * Show dropped count if > 0.
  */
-void toy_tracer_dump(const toy_tracer_t *t, FILE *fp) {
-    if (!t || !fp) return;
+void toy_tracer_dump(const toy_tracer_t *t, int fd) {
+    if (!t || fd < 0) return;
 
     size_t head = __atomic_load_n(&t->head, __ATOMIC_RELAXED);
     size_t start = (head > t->capacity) ? (head - t->capacity) : 0;
@@ -185,17 +187,17 @@ void toy_tracer_dump(const toy_tracer_t *t, FILE *fp) {
     for (size_t i = 0; i < count; i++) {
         trace_event_t ev = t->events[(start + i) & t->mask];
         if (ev.kind == TOY_TRACE_ENTER) {
-            fprintf(fp, "ENTER  hook=%lu tid=%lu args=[", ev.hook_id, ev.thread_id);
+            dprintf(fd, "ENTER  hook=%lu tid=%lu args=[", ev.hook_id, ev.thread_id);
             for (unsigned j = 0; j < ev.argc; j++) {
-                fprintf(fp, "0x%lx", ev.args[j]);
-                if (j < ev.argc - 1) fprintf(fp, " ");
+                dprintf(fd, "0x%lx", ev.args[j]);
+                if (j < ev.argc - 1) dprintf(fd, " ");
             }
-            fprintf(fp, "] @ %lu ns\n", ev.timestamp);
+            dprintf(fd, "] @ %lu\n", ev.timestamp);
         } else if (ev.kind == TOY_TRACE_LEAVE) {
-            fprintf(fp, "LEAVE  hook=%lu tid=%lu ret=0x%lx @ %lu ns\n", ev.hook_id, ev.thread_id, ev.ret_val, ev.timestamp);
+            dprintf(fd, "LEAVE  hook=%lu tid=%lu ret=0x%lx dur=%lu @ %lu\n", ev.hook_id, ev.thread_id, ev.ret_val, ev.duration, ev.timestamp);
         }
     }
     if (dropped > 0) {
-        fprintf(fp, "Dropped %lu events\n", dropped);
+        dprintf(fd, "Dropped %lu events\n", dropped);
     }
 }

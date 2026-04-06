@@ -54,7 +54,7 @@
  *                   For PLT: not needed currently (GOT slot is found by name).
  */
 struct toy_hook {
-    unsigned long id;
+    uint64_t id;
     toy_target_t target;
 
     void *resolved_addr;
@@ -65,7 +65,7 @@ struct toy_hook {
     size_t handler_cap;
 
     int enabled;
-    unsigned long hit_count;
+    uint64_t hit_count;
 
     void *dispatch_stub;
     void *backend_data;
@@ -81,7 +81,7 @@ struct toy_session {
     toy_hook_t **hooks;
     size_t hook_count;
     size_t hook_cap;
-    unsigned long next_id;
+    uint64_t next_id;
 };
 
 /* ── session lifecycle ────────────────────────────────────────── */
@@ -282,53 +282,53 @@ void *toy_hook_off(toy_hook_t *h, const char *name) {
  * value (PLT).  Cast to the appropriate function pointer type based on
  * argc and call with ctx->args[0..argc-1].
  */
-static unsigned long toy_call_original(toy_callctx_t *ctx) {
+static uint64_t toy_call_original(toy_callctx_t *ctx) {
     if (!ctx || !ctx->original_addr) return 0;
 
     void *orig = ctx->original_addr;
     switch (ctx->argc) {
         case 0: {
-            typedef unsigned long (*fn0_t)(void);
+            typedef uint64_t (*fn0_t)(void);
             fn0_t fn = (fn0_t)orig;
             return fn();
         }
         case 1: {
-            typedef unsigned long (*fn1_t)(unsigned long);
+            typedef uint64_t (*fn1_t)(uint64_t);
             fn1_t fn = (fn1_t)orig;
             return fn(ctx->args[0]);
         }
         case 2: {
-            typedef unsigned long (*fn2_t)(unsigned long, unsigned long);
+            typedef uint64_t (*fn2_t)(uint64_t, uint64_t);
             fn2_t fn = (fn2_t)orig;
             return fn(ctx->args[0], ctx->args[1]);
         }
         case 3: {
-            typedef unsigned long (*fn3_t)(unsigned long, unsigned long, unsigned long);
+            typedef uint64_t (*fn3_t)(uint64_t, uint64_t, uint64_t);
             fn3_t fn = (fn3_t)orig;
             return fn(ctx->args[0], ctx->args[1], ctx->args[2]);
         }
         case 4: {
-            typedef unsigned long (*fn4_t)(unsigned long, unsigned long, unsigned long, unsigned long);
+            typedef uint64_t (*fn4_t)(uint64_t, uint64_t, uint64_t, uint64_t);
             fn4_t fn = (fn4_t)orig;
             return fn(ctx->args[0], ctx->args[1], ctx->args[2], ctx->args[3]);
         }
         case 5: {
-            typedef unsigned long (*fn5_t)(unsigned long, unsigned long, unsigned long, unsigned long, unsigned long);
+            typedef uint64_t (*fn5_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
             fn5_t fn = (fn5_t)orig;
             return fn(ctx->args[0], ctx->args[1], ctx->args[2], ctx->args[3], ctx->args[4]);
         }
         case 6: {
-            typedef unsigned long (*fn6_t)(unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long);
+            typedef uint64_t (*fn6_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
             fn6_t fn = (fn6_t)orig;
             return fn(ctx->args[0], ctx->args[1], ctx->args[2], ctx->args[3], ctx->args[4], ctx->args[5]);
         }
         case 7: {
-            typedef unsigned long (*fn7_t)(unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long);
+            typedef uint64_t (*fn7_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
             fn7_t fn = (fn7_t)orig;
             return fn(ctx->args[0], ctx->args[1], ctx->args[2], ctx->args[3], ctx->args[4], ctx->args[5], ctx->args[6]);
         }
         case 8: {
-            typedef unsigned long (*fn8_t)(unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long);
+            typedef uint64_t (*fn8_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
             fn8_t fn = (fn8_t)orig;
             return fn(ctx->args[0], ctx->args[1], ctx->args[2], ctx->args[3], ctx->args[4], ctx->args[5], ctx->args[6], ctx->args[7]);
         }
@@ -377,7 +377,7 @@ static int toy_run_handlers(toy_callctx_t *ctx, unsigned phase) {
 
 static __thread int volatile g_dispatch_depth = 0;
 
-unsigned long toy_dispatch(toy_hook_t *h, unsigned long *args, unsigned argc) {
+uint64_t toy_dispatch(toy_hook_t *h, uint64_t *args, unsigned argc) {
     toy_callctx_t ctx = {0};
     ctx.hook = h;
     ctx.target_addr = h->resolved_addr;
@@ -476,11 +476,11 @@ int toy_hook_disable(toy_hook_t *h) {
 
 /* ── query ────────────────────────────────────────────────────── */
 
-unsigned long toy_hook_get_id(toy_hook_t *h) {
+uint64_t toy_hook_get_id(toy_hook_t *h) {
     return h ? h->id : 0;
 }
 
-unsigned long toy_hook_get_hit_count(toy_hook_t *h) {
+uint64_t toy_hook_get_hit_count(toy_hook_t *h) {
     return h ? __atomic_load_n(&h->hit_count, __ATOMIC_RELAXED) : 0;
 }
 
@@ -510,46 +510,46 @@ int toy_commit(toy_session_t *s) {
 
 /* ── describe ─────────────────────────────────────────────────── */
 
-void toy_hook_describe(toy_hook_t *h, FILE *fp) {
-    if (!h || !fp) return;
+void toy_hook_describe(toy_hook_t *h, int fd) {
+    if (!h || fd < 0) return;
 
     const char *backend_str = h->target.backend == TOY_BACKEND_INLINE ? "inline" :
                           h->target.backend == TOY_BACKEND_PLT ? "plt" : "unknown";
-    fprintf(fp, "Hook #%lu\n", h->id);
-    fprintf(fp, "\t%-14s: ", "target");
+    dprintf(fd, "Hook #%lu\n", h->id);
+    dprintf(fd, "\t%-14s: ", "target");
     if (h->target.backend == TOY_BACKEND_INLINE) {
-        fprintf(fp, "%p\n", h->resolved_addr);
+        dprintf(fd, "%p\n", h->resolved_addr);
     } else if (h->target.backend == TOY_BACKEND_PLT) {
-        fprintf(fp, "%s!%s\n", h->target.by_symbol.module, h->target.by_symbol.symbol);
+        dprintf(fd, "%s!%s\n", h->target.by_symbol.module, h->target.by_symbol.symbol);
     } else {
-        fprintf(fp, "unknown backend %d\n", h->target.backend);
+        dprintf(fd, "unknown backend %d\n", h->target.backend);
     }
-    fprintf(fp, "\t%-14s: %s\n", "backend", backend_str);
+    dprintf(fd, "\t%-14s: %s\n", "backend", backend_str);
     if (h->target.backend == TOY_BACKEND_INLINE) {
-        fprintf(fp, "\t%-14s: 16\n", "patched_len");
+        dprintf(fd, "\t%-14s: 16\n", "patched_len");
         uint32_t orig_insns[4];
         if (hook_inline_get_insns(h->original_addr, orig_insns) == 4) {
-            fprintf(fp, "\t%-14s: %p\n", "original", h->original_addr);
-            fprintf(fp, "\t%-14s: %p\n", "trampoline", h->dispatch_stub);
-            fprintf(fp, "\t%-14s: %s\n", "enabled", h->enabled ? "yes" : "no");
-            fprintf(fp, "\t%-14s: %lu\n", "hits", __atomic_load_n(&h->hit_count, __ATOMIC_RELAXED));
-            fprintf(fp, "\t%-14s: %08x %08x %08x %08x\n", "orig insns",
+            dprintf(fd, "\t%-14s: %p\n", "original", h->original_addr);
+            dprintf(fd, "\t%-14s: %p\n", "trampoline", h->dispatch_stub);
+            dprintf(fd, "\t%-14s: %s\n", "enabled", h->enabled ? "yes" : "no");
+            dprintf(fd, "\t%-14s: %lu\n", "hits", __atomic_load_n(&h->hit_count, __ATOMIC_RELAXED));
+            dprintf(fd, "\t%-14s: %08x %08x %08x %08x\n", "orig insns",
                     orig_insns[0], orig_insns[1], orig_insns[2], orig_insns[3]);
         } else {
-            fprintf(fp, "\t%-14s: (not enabled)\n", "state");
+            dprintf(fd, "\t%-14s: (not enabled)\n", "state");
         }
     } else if (h->target.backend == TOY_BACKEND_PLT) {
-        fprintf(fp, "\t%-14s: %zu\n", "patched_len", sizeof(void *));
-        fprintf(fp, "\t%-14s: %p\n", "original", h->original_addr);
-        fprintf(fp, "\t%-14s: %s\n", "enabled", h->enabled ? "yes" : "no");
-        fprintf(fp, "\t%-14s: %lu\n", "hits", __atomic_load_n(&h->hit_count, __ATOMIC_RELAXED));
+        dprintf(fd, "\t%-14s: %zu\n", "patched_len", sizeof(void *));
+        dprintf(fd, "\t%-14s: %p\n", "original", h->original_addr);
+        dprintf(fd, "\t%-14s: %s\n", "enabled", h->enabled ? "yes" : "no");
+        dprintf(fd, "\t%-14s: %lu\n", "hits", __atomic_load_n(&h->hit_count, __ATOMIC_RELAXED));
     } else {
-        fprintf(fp, "\tunknown backend, cannot describe\n");
+        dprintf(fd, "\tunknown backend, cannot describe\n");
     }
-    fprintf(fp, "\t%-14s:\n", "handlers");
+    dprintf(fd, "\t%-14s:\n", "handlers");
     for (size_t i = 0; i < h->handler_count; i++) {
         toy_handler_t *hd = &h->handlers[i];
-        fprintf(fp, "\t  [%d] %-12s %s%s%s\n",
+        dprintf(fd, "\t  [%d] %-12s %s%s%s\n",
                 hd->priority,
                 hd->name ? hd->name : "?",
                 (hd->phases & TOY_PHASE_BEFORE) ? "BEFORE " : "",
@@ -558,11 +558,11 @@ void toy_hook_describe(toy_hook_t *h, FILE *fp) {
     }
 }
 
-void toy_session_describe(toy_session_t *s, FILE *fp) {
+void toy_session_describe(toy_session_t *s, int fd) {
     if (!s) return;
 
     for (size_t i = 0; i < s->hook_count; i++) {
-        toy_hook_describe(s->hooks[i], fp);
-        fprintf(fp, "-------------------------\n");
+        toy_hook_describe(s->hooks[i], fd);
+        dprintf(fd, "-------------------------\n");
     }
 }

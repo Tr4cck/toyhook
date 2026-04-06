@@ -13,7 +13,7 @@ static toy_hook_t *g_rand_hook;
 static toy_tracer_t *g_tracer;
 
 typedef struct {
-    unsigned long count;
+    uint64_t count;
 } call_state_t;
 
 /* ── Hook 1: __system_property_get (PLT backend) ────────────
@@ -126,7 +126,7 @@ static void on_load(void) {
 
     toy_commit(g_sess);
 
-    toy_session_describe(g_sess, stderr);
+    toy_session_describe(g_sess, fileno(stderr));
 
     static toyhook_server_ctx_t server_ctx = {0};
     server_ctx.session = g_sess;

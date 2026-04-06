@@ -3,7 +3,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 
 typedef struct toy_session toy_session_t;
 typedef struct toy_hook toy_hook_t;
@@ -51,9 +50,9 @@ struct toy_callctx {
     void *target_addr;
     void *original_addr;
 
-    unsigned long args[TOY_MAX_ARGS];
+    uint64_t args[TOY_MAX_ARGS];
     unsigned argc;
-    unsigned long ret_val;
+    uint64_t ret_val;
 
     int skip_original;
 };
@@ -65,18 +64,18 @@ toy_hook_t *toy_hook_add(toy_session_t *s, const toy_target_t *t);
 int toy_hook_remove(toy_session_t *s, toy_hook_t *h);
 
 int toy_hook_on(toy_hook_t *h, const toy_handler_t *handler);
-void *toy_hook_off(toy_hook_t *h, const char *name);  /* returns user_data of removed handler, or NULL */
+void *toy_hook_off(toy_hook_t *h, const char *name);
 
 int toy_hook_enable(toy_hook_t *h);
 int toy_hook_disable(toy_hook_t *h);
-unsigned long toy_hook_get_id(toy_hook_t *h);
-unsigned long toy_hook_get_hit_count(toy_hook_t *h);
+uint64_t toy_hook_get_id(toy_hook_t *h);
+uint64_t toy_hook_get_hit_count(toy_hook_t *h);
 
 int toy_commit(toy_session_t *s);
 
 /* ── describe ─────────────────────────────────────────────────── */
 
-void toy_hook_describe(toy_hook_t *h, FILE *fp);
-void toy_session_describe(toy_session_t *s, FILE *fp);
+void toy_hook_describe(toy_hook_t *h, int fd);
+void toy_session_describe(toy_session_t *s, int fd);
 
 #endif
