@@ -1,5 +1,5 @@
 /*
- * toyhook — unified hook framework (Phase 4)
+ * toyhook — unified hook framework
  *
  * This layer sits above the raw inline_hook and plt_hook backends.
  * It provides:
@@ -16,9 +16,6 @@
  *   ...
  *   toy_hook_disable(hook)
  *   toy_session_destroy(sess)
- *
- * Phase 5 adds toy_dispatch(), which routes intercepted calls through
- * the handler chain (before → replace → original → after).
  */
 
 #include "toyhook.h"
@@ -513,37 +510,6 @@ int toy_commit(toy_session_t *s) {
 
 /* ── describe ─────────────────────────────────────────────────── */
 
-/*
- * toy_hook_describe — pretty-print hook state to a FILE.
- *
- *
- * Format:
- *
- *   Hook #3
- *     target       : libc.so!open
- *     backend      : inline
- *     patched_len  : 16
- *     trampoline   : 0x7f...
- *     original     : 0x7f...
- *     enabled      : yes
- *     hits         : 281
- *
- *     handlers:
- *       [10] log_before      BEFORE
- *       [20] deny_secret     BEFORE
- *       [30] log_after       AFTER
- *
- * Data sources (all from toy_hook_t directly):
- *   - h->id, h->target.backend, h->resolved_addr, h->original_addr
- *   - h->dispatch_stub, h->enabled, h->hit_count
- *   - h->target.by_symbol.module / .symbol  (PLT)
- *   - h->handlers[i].priority / .phases / .name  (handler chain)
- *   - h->hit_count via __atomic_load_n
- *   - For inline: use hook_inline_get_insns(h->original_addr, out)
- *     to get the original instructions, patched_len = 16
- *   - For PLT: patched_len = sizeof(void*)
- *   - For inline also dump original instructions as hex
- */
 void toy_hook_describe(toy_hook_t *h, FILE *fp) {
     if (!h || !fp) return;
 
@@ -592,12 +558,6 @@ void toy_hook_describe(toy_hook_t *h, FILE *fp) {
     }
 }
 
-/*
- * toy_session_describe — pretty-print all hooks in a session.
- *
- *
- * Iterate s->hooks[], call toy_hook_describe for each, add separator.
- */
 void toy_session_describe(toy_session_t *s, FILE *fp) {
     if (!s) return;
 

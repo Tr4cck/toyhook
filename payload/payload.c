@@ -70,10 +70,6 @@ static void on_load(void) {
         LOGE("tracer create failed");
     }
 
-    /* Hook 1: PLT — __system_property_get
-     *   BEFORE handler (priority=-100, runs first): log + count
-     *   AFTER  handler (priority= 100, runs last):  log ret_val
-     */
     toy_target_t prop_tgt = {
         .backend = TOY_BACKEND_PLT,
         .by_symbol = {
@@ -106,9 +102,6 @@ static void on_load(void) {
         toy_hook_on(g_prop_hook, &h_leave);
     }
 
-    /* Hook 2: INLINE — rand
-     *   REPLACE handler: always return 42, skip original entirely
-     */
     void *rand_addr = dlsym(RTLD_DEFAULT, "rand");
     if (rand_addr) {
         toy_target_t rand_tgt = {
@@ -126,13 +119,11 @@ static void on_load(void) {
         }
     }
 
-    /* attach tracer to both hooks — records enter/leave to ring buffer */
     if (g_tracer) {
         if (g_prop_hook) toy_tracer_attach(g_tracer, g_prop_hook);
         if (g_rand_hook)  toy_tracer_attach(g_tracer, g_rand_hook);
     }
 
-    /* batch-enable all hooks that have handlers attached */
     toy_commit(g_sess);
 
     toy_session_describe(g_sess, stderr);

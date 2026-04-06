@@ -107,15 +107,6 @@ static int trace_on_leave(toy_callctx_t *ctx, void *ud) {
 
 /* ── attach / detach ─────────────────────────────────── */
 
-/*
- * Steps:
- *   1. malloc a trace_ctx_t, fill tracer + hook_id (use toy_hook_get_id(h))
- *   2. toy_hook_on(h, BEFORE handler: trace_on_enter, priority=INT_MIN, user_data=ctx)
- *   3. toy_hook_on(h, AFTER handler:  trace_on_leave, priority=INT_MAX, user_data=ctx)
- *   suggestion: "trace_enter" + "trace_leave" as handler names
- *   return 0 on success, -1 on failure.
- *   must also free ctx on failure.
- */
 int toy_tracer_attach(toy_tracer_t *t, toy_hook_t *h) {
     if (!t || !h) return -1;
 
@@ -149,12 +140,6 @@ int toy_tracer_attach(toy_tracer_t *t, toy_hook_t *h) {
     return 0;
 }
 
-/*
- * Steps:
- *   1. toy_hook_off(h, "trace_enter") → returns ctx (user_data)
- *   2. toy_hook_off(h, "trace_leave")
- *   3. free(ctx)
- */
 void toy_tracer_detach(toy_tracer_t *t, toy_hook_t *h) {
     void *ud = toy_hook_off(h, "trace_enter");
     toy_hook_off(h, "trace_leave");
